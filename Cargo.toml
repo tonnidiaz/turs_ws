@@ -13,4 +13,8 @@ futures = "0.3"
 futures-util = "0.3.31"
 tokio-tungstenite = {version = "*", features = ["native-tls"]}
 tungstenite = { version = "*", features = ["native-tls"] }
-turs = { version = "*", path = "../turs" }
+
+[dependencies.turs]
+version = "0.1.0"
+# path = "../turs"
+git = "https://github.com/tonnidiaz/turs.git"

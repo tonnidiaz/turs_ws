@@ -79,20 +79,6 @@ impl Ws {
         ws
     }
 
-    /* pub async fn connect(self: Arc<Self>) -> bool {
-        let mut ok = false;
-        log!("{} connecting to {}...", self.tag, self.url);
-        let stream = self.init().await;//Self::init(&self.url, &self.tag, &self.on_connect).await;
-        if stream.is_some() {
-            *self.stream.write().await = stream;
-            ok = true;
-        }
-        if ok {
-            self.read_msg();
-        }
-        ok
-    } */
-
     pub async fn connect(self: Arc<Self>) -> bool {
         let mut ok = false;
 
@@ -196,7 +182,7 @@ impl Ws {
         });
     }
 
-    pub async fn send(&self, msg: String) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn send(&self, msg: &str) -> Result<(), Box<dyn std::error::Error>> {
         // println!("\n[send] {:?}", self.wrt);
         if let Some(s) = self.wrt.lock().await.as_mut() {
             match s.send(Message::Text(msg.into())).await {

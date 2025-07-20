@@ -21,7 +21,7 @@ use tokio::{
     sync::{Mutex, RwLock},
 };
 use tokio_tungstenite::{
-    MaybeTlsStream, WebSocketStream, connect_async, tungstenite::protocol::Message,
+    connect_async, tungstenite::{self, protocol::Message}, MaybeTlsStream, WebSocketStream
 };
 use tungstenite::{Bytes, client::IntoClientRequest};
 use turs::log;
@@ -62,10 +62,14 @@ impl Ws {
     ///
     /// Call self.connect() after.
     pub async fn new(url: &str, tag: &str) -> Self {
+        // CryptoProvider::install_default(); 
+        /* turs::log!("{tag} installing provider...");
+        rustls::crypto::ring::default_provider().install_default().expect("Failed to install provider.");
         let tag = if tag == "" { "[ws]" } else { tag };
-
+        turs::log!("{tag} provider installed!");
+         */
         let url_str = url.to_string();
-        let ws = Self {
+        let ws = Self { 
             url: url_str,
             tag: tag.to_string(),
             rdr: Mutex::new(None),
@@ -81,14 +85,13 @@ impl Ws {
 
     pub async fn connect(self: Arc<Self>) -> bool {
         let mut ok = false;
-
-        let stream = self.init().await;
         log!(
-            "{} connecting to {} {:?}...",
+            "{} connecting to {}...",
             self.tag,
-            self.url,
-            stream.is_some()
+            self.url
         );
+        let stream = self.init().await;
+
         if stream.is_some() {
             // *self.stream.write().await = stream;
             let (wrt, rdr) = stream.unwrap().split();
@@ -117,7 +120,8 @@ impl Ws {
         match connect_async(url).await {
             Ok(v) => stream = v.0,
             Err(err) => {
-                log!("{tag} failed to connect. {err:?}");
+                let e = err.to_string();
+                log!("{tag} failed to connect. {e:?}");
                 return None;
             }
         }
@@ -147,7 +151,7 @@ impl Ws {
                             Message::Binary(bin) => {
                                 let s = self.clone();
                                 let bin = bin.clone();
-                                
+
                                 tokio::spawn(async move {
                                     if let Some(on_bin_msg) = s.on_bin_msg.read().await.as_ref() {
                                         on_bin_msg(bin).await;

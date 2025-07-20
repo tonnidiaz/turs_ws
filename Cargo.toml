@@ -17,5 +17,5 @@ futures-channel = "0.3.31"
 
 [dependencies.turs]
 version = "0.1.0"
-path = "../turs"
-# git = "https://github.com/tonnidiaz/turs.git"
+# path = "../turs"
+git = "https://github.com/tonnidiaz/turs.git"

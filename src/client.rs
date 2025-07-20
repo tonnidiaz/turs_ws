@@ -187,7 +187,7 @@ impl Ws {
         if let Some(s) = self.wrt.lock().await.as_mut() {
             match s.send(Message::Text(msg.into())).await {
                 Ok(_) => {
-                    // println!("\n[sent]");
+                    println!("\n[sent]");
                 }
                 Err(err) => {
                     println!("Failed to send. {err:?}");

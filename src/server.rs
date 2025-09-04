@@ -56,7 +56,7 @@ pub struct MClient {
     pub id: String,
     stream: TuStream,
     pub addr: SocketAddr,
-    _on_msg: Mutex<Option<Box<dyn Fn(Msg) -> Fut + Send + Sync + 'static>>>,
+    _on_msg: Mutex<Option<Box<dyn Fn(Msg) -> Fut<()> + Send + Sync + 'static>>>,
     rx: Mutex<mpsc::Receiver<Msg>>,
     peers: Clients,
 }
@@ -100,7 +100,7 @@ impl MClient {
     }
     pub async fn on_msg<F>(&self, f: F)
     where
-        F: Fn(Msg) -> Fut + Send + Sync + 'static,
+        F: Fn(Msg) -> Fut<()> + Send + Sync + 'static,
     {
         // sets the _on_msg
         self._on_msg.lock().await.replace(Box::new(f));

@@ -21,16 +21,16 @@ use std::{collections::HashMap, error, net::SocketAddr, sync::Arc};
 
 use futures::{
     SinkExt,
-    stream::{SplitSink, SplitStream},
+    stream::SplitSink,
 };
 use futures_util::StreamExt;
 
 use tokio::{
     net::{TcpListener, TcpStream},
-    sync::{mpsc, Mutex}, time,
+    sync::{Mutex, RwLock},
 };
 use tokio_tungstenite::{WebSocketStream, tungstenite::protocol::Message};
-use turs::{Fut, funcs::ts};
+use turs::{Fut, Res, elog, log};
 
 type Stream = WebSocketStream<TcpStream>;
 #[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
@@ -39,74 +39,36 @@ pub struct Msg {
     pub data: serde_json::Value,
 }
 
-pub struct TuStream {
-    pub rdr: Arc<Mutex<SplitStream<Stream>>>,
-    pub wrt: Arc<Mutex<SplitSink<Stream, Message>>>,
-}
 
-type Clients = Arc<Mutex<HashMap<SocketAddr, Arc<MClient>>>>;
+
+type Peers = Arc<RwLock<HashMap<SocketAddr, Peer>>>;
 pub struct WsServer {
     pub url: String,
-    pub clients: Clients,
-    pub connect: mpsc::Receiver<Arc<MClient>>,
-    connect_tx: mpsc::Sender<Arc<MClient>>,
+    peers: Peers,
 }
 
-pub struct MClient {
+struct PeerInner {
+    on_msg: Mutex<Option<Box<dyn Fn(Msg) -> Fut<()> + Send + Sync>>>,
+    wrt: Mutex<SplitSink<Stream, Message>>,
+}
+#[derive(Clone)]
+pub struct Peer {
     pub id: String,
-    stream: TuStream,
     pub addr: SocketAddr,
-    _on_msg: Mutex<Option<Box<dyn Fn(Msg) -> Fut<()> + Send + Sync + 'static>>>,
-    rx: Mutex<mpsc::Receiver<Msg>>,
-    peers: Clients,
+    inner: Arc<PeerInner>,
+    peers: Peers,
 }
 
-impl MClient {
-    pub fn new(
-        addr: SocketAddr,
-        stream: TuStream,
-        rx: mpsc::Receiver<Msg>,
-        peers: Clients,
-    ) -> Arc<Self> {
-        let s = Self {
-            id: format!("client_{}", addr.port()),
-            addr,
-            stream,
-            rx: Mutex::new(rx),
-            _on_msg: Mutex::new(None),
-            peers,
-        };
-
-        let s = Arc::new(s);
-        let s_c = s.clone();
-        tokio::spawn(async move {
-            while let Some(msg) = s_c.rx.lock().await.recv().await {
-                // let id = s_c.id.clone();
-                // turs::log!("{id} the message:\n{msg:?}");
-                let s = s_c.clone();
-                tokio::spawn(async move {
-                    loop {
-                        if let Some(cb) = s._on_msg.lock().await.as_ref() {
-                            // turs::log!("{id} calling cb");
-                            cb(msg).await;
-                            break;
-                        }
-                        time::sleep(time::Duration::from_millis(100)).await;
-                    }
-                });
-            }
-        });
-        s
-    }
+impl Peer {
+    /// sets on on_msg callback
     pub async fn on_msg<F>(&self, f: F)
     where
         F: Fn(Msg) -> Fut<()> + Send + Sync + 'static,
     {
-        // sets the _on_msg
-        self._on_msg.lock().await.replace(Box::new(f));
+        self.inner.on_msg.lock().await.replace(Box::new(f));
     }
     pub async fn send(&self, msg: &str) -> Result<(), Box<dyn error::Error>> {
-        self.stream
+        self.inner
             .wrt
             .lock()
             .await
@@ -114,117 +76,101 @@ impl MClient {
             .await?;
         Ok(())
     }
-
     pub async fn broadcast(&self, msg: &str) {
-        let peers = self.peers.lock().await;
-        let peers: Vec<_> = peers.values().collect();
-        for peer in peers {
-            if peer.addr != self.addr {
+        for (addr, peer) in self.peers.write().await.iter() {
+            if addr != &self.addr {
                 if let Err(err) = peer.send(msg).await {
-                    println!(
-                        "\n[{}] failed to broadcast message to peer: {}.\n{err:?}",
-                        ts(),
-                        peer.addr.port()
-                    );
+                    elog!("Failed to broadcast message to peer: {}.\n{err:?}", peer.id);
                 };
             }
         }
     }
 }
-
 impl WsServer {
+    /// The call self.init()
     pub fn new(url: &str) -> Self {
-        let (connect_tx, connect) = mpsc::channel(100);
         Self {
             url: url.to_string(),
-            clients: Arc::new(Mutex::new(HashMap::new())),
-            connect,
-            connect_tx,
+            peers: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
-    pub async fn init(&self) -> bool {
+    pub async fn init<F>(&self, on_connect: F) -> Res<()>
+    where
+        F: Fn(Peer) -> Fut<()> + Send + Sync + 'static,
+    {
         let addr = &self.url.clone();
 
-        let try_socket = TcpListener::bind(addr).await;
-        let listener = match try_socket {
-            Ok(l) => l,
-            Err(err) => {
-                eprintln!("\nFailed to bind. {err:?}");
-                return false;
-            }
-        };
+        let listener = TcpListener::bind(addr).await?;
 
         println!("Listening on: {}", addr);
-        let clients = self.clients.clone();
-        let connect_tx = self.connect_tx.clone();
-        tokio::spawn(async move {
-            while let Ok((stream, addr)) = listener.accept().await {
-                let clients = clients.clone();
-                let connect_tx = connect_tx.clone();
+        let clients = self.peers.clone();
+        let on_connect = Arc::new(on_connect);
+        // tokio::spawn(async move {
+        while let Ok((stream, addr)) = listener.accept().await {
+            let clients = clients.clone();
+            let on_connect = on_connect.clone();
 
-                tokio::spawn(async move {
-                    let ws_stream = tokio_tungstenite::accept_async(stream)
-                        .await
-                        .expect("\nError during the websocket handshake occurred");
-                    let (wrt, rdr) = ws_stream.split();
+            tokio::spawn(async move {
+                let ws_stream = tokio_tungstenite::accept_async(stream)
+                    .await
+                    .expect("\nError during the websocket handshake occurred");
+                let (wrt, mut rdr) = ws_stream.split();
 
-                    // server.onconnect()
-                    let wrt = Arc::new(Mutex::new(wrt));
-                    let rdr = Arc::new(Mutex::new(rdr));
-                    println!("\nWebSocket connection established: {}", addr);
+                // server.onconnect()
+                let peer = Peer {
+                    id: format!("peer__{}", addr.port()),
+                    addr: addr.clone(),
+                    inner: Arc::new(PeerInner {
+                        on_msg: Mutex::new(None),
+                        wrt: Mutex::new(wrt),
+                    }),
+                    peers: clients.clone()
+                };
 
-                    let (tx, rx) = mpsc::channel(100);
-                    let tx_c = tx.clone();
-                    let client = MClient::new(
-                        addr,
-                        TuStream {
-                            wrt: wrt.clone(),
-                            rdr: rdr.clone(),
-                        },
-                        rx,
-                        clients.clone(),
-                    );
+                clients.write().await.insert(addr.clone(), peer.clone());
+                tokio::spawn({
+                    let peer = peer.clone();
+                    async move {
+                        on_connect(peer).await;
+                    }
+                });
 
-                    // report
-                    connect_tx
-                        .send(client.clone())
-                        .await
-                        .expect("Failed to send client to connect tx.");
+                while let Some(msg) = rdr.next().await {
+                    // turs::log!("{addr:?} on_message:\n{msg:?}");
 
-                    /* let client = Arc::new(Mutex::new(client));
-                    let client_cl = client.clone(); */
-                    clients.lock().await.insert(addr, client.clone());
-
-                    while let Some(msg) = rdr.lock().await.next().await {
-                        // turs::log!("{addr:?} on_message:\n{msg:?}");
-                        if let Ok(msg) = msg {
-                            let ts = ts();
+                    if let Ok(msg) = msg {
+                        let has_msg_listener = peer.inner.on_msg.lock().await.is_some();
+                        if has_msg_listener {
                             match msg {
                                 Message::Text(text) => {
                                     let msg = text.clone().to_string();
                                     if let Ok(msg) = serde_json::from_str(&msg) {
-                                        tx_c.send(msg)
-                                            .await
-                                            .expect("Failed to send message to client");
+                                        let inner = peer.inner.clone();
+                                        tokio::spawn(async move {
+                                            let binding = inner.on_msg.lock().await;
+                                            let cb = binding.as_ref().unwrap();
+                                            cb(msg).await
+                                        });
                                     } else {
-                                        println!("\n[{ts}] invalid message type: {msg:#?}");
+                                        elog!("invalid message type (expected {{ ev: string, data: any }}), got: {msg:#?}");
                                     }
                                 }
-                                Message::Close(msg) => println!("\n[{ts}] Close: {msg:#?}"),
+                                Message::Close(msg) => elog!("Close: {msg:#?}"),
                                 _ => {
-                                    println!("\n[{ts}] OTHER MSG TYPE:\n {msg:?}");
+                                    log!("OTHER MSG TYPE:\n {msg:?}");
                                 }
                             }
                         }
                     }
+                }
 
-                    turs::elog!("Client_{} disconnected!", addr.port());
-                    clients.lock().await.remove(&addr);
-                });
-            }
-            clients.lock().await.clear();
-        });
-        true
+                turs::elog!("Client_{} disconnected!", addr.port());
+                clients.write().await.remove(&addr);
+            });
+        }
+        clients.write().await.clear();
+        // });
+        Ok(())
     }
 }

@@ -1,0 +1,11 @@
+[package]
+name = "tutest"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+turs = { version = "0.1.0", path = "../../turs" }
+turs_ws = { version = "0.1.0", path = ".." }
+
+[lints.rust]
+dead-code = "allow"

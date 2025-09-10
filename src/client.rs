@@ -11,8 +11,7 @@ use tokio::{
     sync::{RwLock, mpsc},
 };
 use tokio_tungstenite::{
-    MaybeTlsStream, WebSocketStream, connect_async,
-    tungstenite::{self, protocol::Message},
+    connect_async, tungstenite::{self, protocol::Message, Utf8Bytes}, MaybeTlsStream, WebSocketStream
 };
 use tungstenite::Bytes;
 use turs::{Fut, Res, elog, log, sleep};
@@ -25,7 +24,7 @@ pub type OnConnectCb =
 // pub type ConnectFn<F> = RwLock<Option<Arc<F>>>;
 struct WsInner {
     wrt_tx: mpsc::Sender<Message>,
-    on_msg: RwLock<Option<Box<dyn Fn(String) -> Fut<()> + Send + Sync + 'static>>>,
+    on_msg: RwLock<Option<Box<dyn Fn(Utf8Bytes) -> Fut<()> + Send + Sync + 'static>>>,
     on_bin_msg: RwLock<Option<Box<dyn Fn(Bytes) -> Fut<()> + Send + Sync + 'static>>>,
     on_connect: RwLock<Option<OnConnectCb>>,
     url: Cow<'static, str>,
@@ -42,7 +41,6 @@ pub struct Ws {
 impl Ws {
     /// Just creates a new Ws instance.
     ///
-    /// Call self.connect() after.
     pub async fn new(url: &str, tag: &str) -> Self {
         let (wrt_tx, wrt_rx) = mpsc::channel(100);
         let ws = Self {
@@ -70,7 +68,7 @@ impl Ws {
     /// sets the on_msg callback
     pub async fn on_msg<F>(&self, f: F)
     where
-        F: Fn(String) -> Fut<()> + Sync + Send + 'static,
+        F: Fn(Utf8Bytes) -> Fut<()> + Sync + Send + 'static,
     {
         self.inner.on_msg.write().await.replace(Box::new(f));
     }
@@ -119,7 +117,7 @@ impl Ws {
                                     Message::Text(text) => {
                                         // Process text message
                                         if let Some(on_msg) = self.inner.on_msg.read().await.as_ref() {
-                                            on_msg(text.to_string()).await;
+                                            on_msg(text).await;
                                         }
                                     }
                                     Message::Binary(bin) => {

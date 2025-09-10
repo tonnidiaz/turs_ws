@@ -1,5 +1,6 @@
 pub mod client;
 pub mod server;
+pub use tokio_tungstenite::tungstenite::Utf8Bytes;
 pub fn add(left: u64, right: u64) -> u64 {
     left + right
 }

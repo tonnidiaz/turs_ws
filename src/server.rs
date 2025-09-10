@@ -1,38 +1,16 @@
-//! A chat server that broadcasts a message to all connections.
-//!
-//! This is a simple line-based server which accepts WebSocket connections,
-//! reads lines from those connections, and broadcasts the lines to all other
-//! connected clients.
-//!
-//! You can test this out by running:
-//!
-//!     cargo run --example server 127.0.0.1:12345
-//!
-//! And then in another window run:
-//!
-//!     cargo run --example client ws://127.0.0.1:12345/
-//!
-//! You can run the second command in multiple windows and then chat between the
-//! two, seeing the messages from the other client as they're received. For all
-//! connected clients they'll all join the same room and see everyone else's
-//! messages.
 
-use std::{collections::HashMap, error, net::SocketAddr, sync::Arc};
+use std::{borrow::Cow, collections::HashMap, error, net::SocketAddr, sync::Arc};
 
-use futures::{
-    SinkExt,
-    stream::SplitSink,
-};
+use futures::SinkExt;
 use futures_util::StreamExt;
 
-use tokio::{
-    net::{TcpListener, TcpStream},
-    sync::{Mutex, RwLock},
+use tokio::{ 
+    net::TcpListener,
+    sync::{mpsc, Mutex, RwLock},
 };
-use tokio_tungstenite::{WebSocketStream, tungstenite::protocol::Message};
+use tokio_tungstenite::tungstenite::protocol::Message;
 use turs::{Fut, Res, elog, log};
 
-type Stream = WebSocketStream<TcpStream>;
 #[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
 pub struct Msg {
     pub ev: String,
@@ -43,17 +21,17 @@ pub struct Msg {
 
 type Peers = Arc<RwLock<HashMap<SocketAddr, Peer>>>;
 pub struct WsServer {
-    pub url: String,
+    pub url: Cow<'static, str>,
     peers: Peers,
 }
 
 struct PeerInner {
     on_msg: Mutex<Option<Box<dyn Fn(Msg) -> Fut<()> + Send + Sync>>>,
-    wrt: Mutex<SplitSink<Stream, Message>>,
+    wrt_tx: mpsc::Sender<Message>
 }
 #[derive(Clone)]
 pub struct Peer {
-    pub id: String,
+    pub id: Cow<'static, str>,
     pub addr: SocketAddr,
     inner: Arc<PeerInner>,
     peers: Peers,
@@ -69,9 +47,7 @@ impl Peer {
     }
     pub async fn send(&self, msg: &str) -> Result<(), Box<dyn error::Error>> {
         self.inner
-            .wrt
-            .lock()
-            .await
+            .wrt_tx
             .send(Message::Text(msg.into()))
             .await?;
         Ok(())
@@ -90,7 +66,7 @@ impl WsServer {
     /// The call self.init()
     pub fn new(url: &str) -> Self {
         Self {
-            url: url.to_string(),
+            url: Cow::Owned(url.to_string()),
             peers: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -99,12 +75,11 @@ impl WsServer {
     where
         F: Fn(Peer) -> Fut<()> + Send + Sync + 'static,
     {
-        let addr = &self.url.clone();
 
-        let listener = TcpListener::bind(addr).await?;
+        let listener = TcpListener::bind(self.url.as_ref()).await?;
 
-        println!("Listening on: {}", addr);
-        let clients = self.peers.clone();
+        log!("Listening on: {}", self.url);
+        let clients = &self.peers;
         let on_connect = Arc::new(on_connect);
         // tokio::spawn(async move {
         while let Ok((stream, addr)) = listener.accept().await {
@@ -115,18 +90,36 @@ impl WsServer {
                 let ws_stream = tokio_tungstenite::accept_async(stream)
                     .await
                     .expect("\nError during the websocket handshake occurred");
-                let (wrt, mut rdr) = ws_stream.split();
+                let (mut wrt, mut rdr) = ws_stream.split();
+                let (wrt_tx, mut wrt_rcv) = mpsc::channel(100);
 
+               
                 // server.onconnect()
                 let peer = Peer {
-                    id: format!("peer__{}", addr.port()),
+                    id: Cow::Owned(format!("peer__{}", addr.port())),
                     addr: addr.clone(),
                     inner: Arc::new(PeerInner {
                         on_msg: Mutex::new(None),
-                        wrt: Mutex::new(wrt),
+                        wrt_tx,
                     }),
                     peers: clients.clone()
                 };
+                 // spawn msg listener
+                tokio::spawn({
+                    let clients = clients.clone();
+                    let peer = peer.clone();
+                    async move{
+                    // from peer.send()
+                    while let Some(msg) = wrt_rcv.recv().await{
+                        // forward to client
+                        if let Err(err) = wrt.send(msg).await{
+                            elog!("Failed to send msg to client {}. {err:?}", peer.id);
+                            // remove from peer list
+                            clients.write().await.remove(&addr);
+                            break;
+                        };
+                    }
+                }});
 
                 clients.write().await.insert(addr.clone(), peer.clone());
                 tokio::spawn({
@@ -137,23 +130,21 @@ impl WsServer {
                 });
 
                 while let Some(msg) = rdr.next().await {
-                    // turs::log!("{addr:?} on_message:\n{msg:?}");
 
                     if let Ok(msg) = msg {
-                        let has_msg_listener = peer.inner.on_msg.lock().await.is_some();
-                        if has_msg_listener {
                             match msg {
                                 Message::Text(text) => {
-                                    let msg = text.clone().to_string();
-                                    if let Ok(msg) = serde_json::from_str(&msg) {
+                                    if let Ok(msg) = serde_json::from_str(&text) {
                                         let inner = peer.inner.clone();
                                         tokio::spawn(async move {
                                             let binding = inner.on_msg.lock().await;
-                                            let cb = binding.as_ref().unwrap();
-                                            cb(msg).await
+                                            if let Some(cb) = binding.as_ref(){
+                                                cb(msg).await;
+                                            };
+                                            
                                         });
                                     } else {
-                                        elog!("invalid message type (expected {{ ev: string, data: any }}), got: {msg:#?}");
+                                        elog!("invalid message type (expected {{ ev: string, data: any }}), got: {text:#?}");
                                     }
                                 }
                                 Message::Close(msg) => elog!("Close: {msg:#?}"),
@@ -161,7 +152,7 @@ impl WsServer {
                                     log!("OTHER MSG TYPE:\n {msg:?}");
                                 }
                             }
-                        }
+                        
                     }
                 }
 

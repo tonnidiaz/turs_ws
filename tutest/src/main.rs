@@ -1,26 +1,27 @@
+use std::thread::park;
+
 use turs::{
-    chrono::{self},
     log,
-    serde_json::json,
-    sleep,
     tokio::{self},
 };
 use turs_ws::client;
 #[tokio::main]
 async fn main() {
-    let l = chrono::Local::now();
-    log!("Hello, world! {:?}", l.to_rfc2822());
+    log!("Hello, world!");
     let _ws = client::Ws::new("ws://localhost:5000", "[my_ws]").await;
-    let tag = _ws.tag.clone();
     _ws.clone()
-        .on_msg(move |msg| {
-            let tag = tag.clone();
-            Box::pin(async move {
-                log!("{} [on_msg] {msg}", tag);
-            })
-        })
+        .on_msg({
+            let _ws = _ws.clone();
+            move |msg| {
+                let _ws = _ws.clone();
+                Box::pin(async move {
+                    log!("{} [on_msg] {msg}", _ws.tag());
+                })
+            }
+        }) 
         .await;
-    tokio::spawn({
+    park();
+    /* tokio::spawn({
         let _ws = _ws.clone();
         let mut i = 0;
         async move {
@@ -43,6 +44,6 @@ async fn main() {
             }
         }
     });
-    sleep(1500).await;
-    _ws.connect().await.expect("Failed to init ws client.");
+    sleep(1500).await; */
+    // _ws.connect().await.expect("Failed to init ws client.");
 }

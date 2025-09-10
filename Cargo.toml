@@ -23,3 +23,6 @@ futures-channel = "0.3.31"
 version = "0.1.0"
 # path = "../turs"
 git = "https://github.com/tonnidiaz/turs.git"
+
+[lints.rust]
+dead-code = "allow"

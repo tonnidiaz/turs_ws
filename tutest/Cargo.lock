@@ -920,6 +920,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "turs"
+version = "0.1.0"
+source = "git+https://github.com/tonnidiaz/turs.git#7ee0b22de4532d69f38e3374cbe91aea3b9d0a4b"
+dependencies = [
+ "chrono",
+ "futures",
+ "futures-util",
+ "rand",
+ "serde",
+ "serde_json",
+ "strum",
+ "tokio",
+]
+
+[[package]]
 name = "turs_ws"
 version = "0.1.0"
 dependencies = [
@@ -932,14 +947,14 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-tungstenite",
- "turs",
+ "turs 0.1.0 (git+https://github.com/tonnidiaz/turs.git)",
 ]
 
 [[package]]
 name = "tutest"
 version = "0.1.0"
 dependencies = [
- "turs",
+ "turs 0.1.0",
  "turs_ws",
 ]
 
